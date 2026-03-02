@@ -1,9 +1,9 @@
-export const VAD_SILENCE_THRESHOLD_MS = 800;
-export const VAD_ENERGY_THRESHOLD = 0.01;
+export const VAD_SILENCE_THRESHOLD_MS = 1500;
+export const VAD_ENERGY_THRESHOLD = 0.025;
 export const ORIGINAL_AUDIO_GAIN = 0.15;
 export const DUCKED_AUDIO_GAIN = 0.05;
 export const ASSISTANT_INTERVAL_MS = 30000;
-export const ASSISTANT_MIN_NEW_WORDS = 50;
+export const ASSISTANT_MIN_NEW_WORDS = 20;
 export const MAX_CONCURRENT_TRANSLATIONS = 2;
 export const TTS_VOICE_DEFAULT = 'nova';
 export const LANGUAGE_BROADCAST_INTERVAL_MS = 2000;

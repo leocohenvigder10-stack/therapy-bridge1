@@ -12,6 +12,15 @@ interface TranscriptEntry {
   timestamp: number;
 }
 
+// Client-side guard: reject transcripts that look like noise/hallucinations
+function isValidTranscript(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  // Need at least 2 words with 2+ characters each to be considered real speech
+  const realWords = trimmed.split(/\s+/).filter(w => w.replace(/[^a-zA-Z\u00C0-\u024F]/g, '').length >= 2);
+  return realWords.length >= 2;
+}
+
 // Helper: set up VAD + transcription on an audio track
 function setupTrackCapture(
   track: { getMediaStreamTrack: () => MediaStreamTrack },
@@ -41,7 +50,12 @@ function setupTrackCapture(
     let speechBuf: Float32Array[] = [];
     const dataArray = new Float32Array(analyser.fftSize);
 
+    // Track consecutive transcription attempts to avoid hammering API on noise bursts
+    let pendingTranscription = false;
+
     const transcribeChunk = async (blob: Blob) => {
+      if (pendingTranscription) return; // Don't stack requests
+      pendingTranscription = true;
       try {
         const fd = new FormData();
         fd.append('audio', blob, 'speech.wav');
@@ -49,12 +63,15 @@ function setupTrackCapture(
         const res = await fetch('/api/transcribe', { method: 'POST', body: fd });
         if (!res.ok) return;
         const { text } = await res.json();
-        if (text?.trim()) {
+        // Client-side validation: only accept real speech, not noise artifacts
+        if (text && isValidTranscript(text)) {
           transcript.push({ speaker, text: text.trim(), timestamp: Date.now() });
           console.log(`[Assistant] ${speaker}:`, text.trim());
         }
       } catch (err) {
         console.error(`[Assistant] Transcribe error (${speaker}):`, err);
+      } finally {
+        pendingTranscription = false;
       }
     };
 
@@ -67,7 +84,10 @@ function setupTrackCapture(
       const now = Date.now();
 
       if (rms > VAD_ENERGY_THRESHOLD) {
-        if (!isSpeaking) { isSpeaking = true; speechBuf = []; }
+        if (!isSpeaking) {
+          isSpeaking = true;
+          speechBuf = [];
+        }
         silenceStart = 0;
         speechBuf.push(new Float32Array(e.inputBuffer.getChannelData(0)));
       } else if (isSpeaking) {
@@ -79,7 +99,8 @@ function setupTrackCapture(
           silenceStart = 0;
           if (speechBuf.length > 0) {
             const concat = concatFloat32Arrays(speechBuf);
-            if (concat.length > ctx.sampleRate * 0.5) {
+            // Require at least 1 second of audio (at browser sample rate ~44100)
+            if (concat.length > ctx.sampleRate * 1.0) {
               transcribeChunk(float32ToWav(concat, ctx.sampleRate));
             }
           }
@@ -111,6 +132,8 @@ export function useAssistant(
   const transcriptRef = useRef<TranscriptEntry[]>([]);
   const lastAnalyzedRef = useRef(0);
   const counterRef = useRef(0);
+  // Store rolling summary so Claude has conversation memory between intervals
+  const previousSummaryRef = useRef<string>('');
 
   // Set up local (therapist) track capture
   useEffect(() => {
@@ -133,6 +156,7 @@ export function useAssistant(
     const entries = transcriptRef.current;
     const newEntries = entries.slice(lastAnalyzedRef.current);
     const newWords = newEntries.reduce((s, e) => s + e.text.split(' ').length, 0);
+
     if (newWords < ASSISTANT_MIN_NEW_WORDS) return;
 
     setIsAnalyzing(true);
@@ -150,25 +174,56 @@ export function useAssistant(
       const res = await fetch('/api/assistant', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ transcript, therapistLanguage, clientLanguage: clientLanguage || 'unknown' }),
+        body: JSON.stringify({
+          transcript,
+          therapistLanguage,
+          clientLanguage: clientLanguage || 'unknown',
+          // Pass previous summary so Claude has context from earlier in the session
+          previousSummary: previousSummaryRef.current || undefined,
+        }),
       });
       if (!res.ok) throw new Error(`Assistant ${res.status}`);
       const data: AssistantResponse = await res.json();
+
+      // Update rolling summary for next interval
+      if (data.summary) {
+        previousSummaryRef.current = data.summary;
+      }
+
       const batch = counterRef.current++;
       const newInsights: AssistantInsight[] = [];
 
       data.cultural?.forEach((item, i) => newInsights.push({
-        id: `c-${batch}-${i}`, category: 'cultural', title: item.title, content: item.content, isNew: true, timestamp: Date.now(),
+        id: `c-${batch}-${i}`,
+        category: 'cultural',
+        title: item.title,
+        content: item.content,
+        isNew: true,
+        timestamp: Date.now(),
       }));
       data.techniques?.forEach((item, i) => newInsights.push({
-        id: `t-${batch}-${i}`, category: 'technique', title: item.title,
-        content: `${item.content}${item.approach ? ` (${item.approach})` : ''}`, isNew: true, timestamp: Date.now(),
+        id: `t-${batch}-${i}`,
+        category: 'technique',
+        title: item.title,
+        content: `${item.content}${item.approach ? ` (${item.approach})` : ''}`,
+        isNew: true,
+        timestamp: Date.now(),
       }));
       data.flags?.forEach((item, i) => newInsights.push({
-        id: `f-${batch}-${i}`, category: 'flag', title: item.title, content: item.content, isNew: true, timestamp: Date.now(),
+        id: `f-${batch}-${i}`,
+        category: 'flag',
+        title: item.title,
+        content: item.content,
+        isNew: true,
+        timestamp: Date.now(),
       }));
       data.notes?.forEach((item, i) => newInsights.push({
-        id: `n-${batch}-${i}`, category: 'note', title: item.title, content: item.content, isNew: true, timestamp: Date.now(),
+        id: `n-${batch}-${i}`,
+        category: 'note',
+        title: item.title,
+        content: item.content,
+        isNew: true,
+        timestamp: Date.now(),
       }));
 
       if (newInsights.length > 0) {
@@ -192,7 +247,6 @@ export function useAssistant(
   const generateSummary = useCallback(async () => {
     const entries = transcriptRef.current;
     if (entries.length === 0) return;
-
     setSummaryLoading(true);
     const startTime = entries[0]?.timestamp || Date.now();
     const transcript = entries.map(e => {
@@ -201,7 +255,6 @@ export function useAssistant(
       const s = (elapsed % 60).toString().padStart(2, '0');
       return `[${m}:${s}] ${e.speaker.toUpperCase()}: ${e.text}`;
     }).join('\n');
-
     try {
       const res = await fetch('/api/assistant', {
         method: 'POST',
@@ -210,11 +263,13 @@ export function useAssistant(
           transcript,
           therapistLanguage,
           clientLanguage: clientLanguage || 'unknown',
+          previousSummary: previousSummaryRef.current || undefined,
           generateSummary: true,
         }),
       });
       if (!res.ok) throw new Error(`Summary ${res.status}`);
       const data = await res.json();
+      if (data.summary) previousSummaryRef.current = data.summary;
       const summaryInsight: AssistantInsight = {
         id: `summary-${Date.now()}`,
         category: 'note',
