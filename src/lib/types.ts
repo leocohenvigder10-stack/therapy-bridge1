@@ -23,6 +23,7 @@ export interface AssistantResponse {
   techniques: Array<{ title: string; content: string; approach: string }>;
   flags: Array<{ title: string; content: string; severity: string }>;
   notes: Array<{ title: string; content: string }>;
+    summary?: string;
 }
 
 export interface TranslationChunk {
