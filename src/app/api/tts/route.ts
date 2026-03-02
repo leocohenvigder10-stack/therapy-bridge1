@@ -22,13 +22,14 @@ export async function POST(req: NextRequest) {
       model: 'tts-1',
       voice: voice || 'nova',
       input: text,
-      response_format: 'opus',
+      response_format: 'mp3',
+      speed: 1.1,
     });
 
     // Stream the audio back
     return new Response(response.body as ReadableStream, {
       headers: {
-        'Content-Type': 'audio/opus',
+        'Content-Type': 'audio/mpeg',
         'Cache-Control': 'no-cache',
       },
     });
