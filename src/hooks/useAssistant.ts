@@ -100,7 +100,7 @@ function setupTrackCapture(
           if (speechBuf.length > 0) {
             const concat = concatFloat32Arrays(speechBuf);
             // Require at least 1 second of audio (at browser sample rate ~44100)
-            if (concat.length > ctx.sampleRate * 1.0) {
+            if (concat.length > ctx.sampleRate * 0.5) {
               transcribeChunk(float32ToWav(concat, ctx.sampleRate));
             }
           }
